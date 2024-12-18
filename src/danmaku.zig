@@ -9,10 +9,13 @@ const log = std.log;
 pub fn _start() void {}
 
 var bullet_texture: *c.SDL_Texture = undefined;
+var player_bullet_texture: *c.SDL_Texture = undefined;
 var player_texture: *c.SDL_Texture = undefined;
 var hitbox_texture: *c.SDL_Texture = undefined;
+var option_texture: *c.SDL_Texture = undefined;
 
 const Game = struct {
+    step: u64,
     renderer: *c.SDL_Renderer,
     window: *c.SDL_Window,
     rand: std.Random.DefaultPrng,
@@ -24,21 +27,21 @@ const Game = struct {
     }
 
     fn update(g: *Game) !void {
-        step += 1;
+        g.step += 1;
 
-        g.player.update();
+        try g.player.update();
 
         for (g.bullets.items) |*bullet| {
             bullet.update();
         }
 
-        if (step % 29 == 0) {
+        if (g.step % 29 == 0) {
             for (0..16) |_| {
                 const angle: f32 = g.random().float(f32) * 360;
                 try g.bullets.append(std.heap.c_allocator, .{
                     .game = g,
                     .texture = bullet_texture,
-                    .sprite = @intCast(step % 6),
+                    .sprite = @intCast(g.step % 6),
                     .x = 370,
                     .y = 100,
                     .w = 10,
@@ -48,6 +51,7 @@ const Game = struct {
                     .vy = -@cos(std.math.degreesToRadians(angle)),
                     .player = false,
                     .dead = false,
+                    .updateFn = &Bullet.updateHoming,
                 });
             }
         }
@@ -82,14 +86,24 @@ const Bullet = struct {
     vy: f32,
     player: bool,
     dead: bool,
+    updateFn: *const fn (b: *Bullet) void,
 
-    const death_boundary = 50;
+    fn updateConstant(b: *Bullet) void {
+        b.x += b.vx;
+        b.y += b.vy;
+    }
 
-    fn update(b: *Bullet) void {
+    fn updateHoming(b: *Bullet) void {
         b.vx -= 0.0001 * (b.x - b.game.player.x);
         b.vy -= 0.0001 * (b.y - b.game.player.y);
         b.x += b.vx;
         b.y += b.vy;
+    }
+
+    const death_boundary = 50;
+
+    fn update(b: *Bullet) void {
+        b.updateFn(b);
         b.dead = b.x + b.w <= -death_boundary or
             b.x >= playfield_rect.w + death_boundary or
             b.y + b.h <= -death_boundary or
@@ -159,10 +173,28 @@ const Player = struct {
         }
     }
 
-    fn update(p: *Player) void {
+    fn update(p: *Player) !void {
         const vx, const vy = p.v();
         p.x = std.math.clamp(p.x + vx, p.w / 2, playfield_rect.w - p.w / 2);
         p.y = std.math.clamp(p.y + vy, p.h / 2, playfield_rect.h - p.h / 2);
+        if (p.fire and p.game.step % 8 == 0) {
+            const option_x, const option_y = p.optionPos();
+            try p.game.bullets.append(gpa, .{
+                .game = p.game,
+                .texture = player_bullet_texture,
+                .sprite = 0,
+                .x = option_x,
+                .y = option_y,
+                .w = 32,
+                .h = 16,
+                .hit = 16,
+                .vx = 0,
+                .vy = -10,
+                .player = true,
+                .dead = false,
+                .updateFn = &Bullet.updateConstant,
+            });
+        }
     }
 
     fn draw(p: Player) void {
@@ -181,6 +213,21 @@ const Player = struct {
         };
         _ = c.SDL_RenderTexture(p.game.renderer, p.texture, &src, &dest);
 
+        const option_x, const option_y = p.optionPos();
+        const option_src: c.SDL_FRect = .{
+            .x = 0,
+            .y = 0,
+            .w = 24,
+            .h = 24,
+        };
+        const option_dest: c.SDL_FRect = .{
+            .x = option_x - 12,
+            .y = option_y - 12,
+            .w = 24,
+            .h = 24,
+        };
+        _ = c.SDL_RenderTexture(p.game.renderer, option_texture, &option_src, &option_dest);
+
         if (p.focus) {
             const hitbox_src: c.SDL_FRect = .{
                 .x = 0,
@@ -196,6 +243,10 @@ const Player = struct {
             };
             _ = c.SDL_RenderTexture(p.game.renderer, p.hitbox_texture, &hitbox_src, &hitbox_dest);
         }
+    }
+
+    fn optionPos(p: Player) struct { f32, f32 } {
+        return .{ p.x, p.y - p.h / 2 - 16 };
     }
 
     fn v(p: Player) struct { f32, f32 } {
@@ -220,7 +271,6 @@ const Player = struct {
 
 var last_step: u64 = 0;
 const step_rate = 1000 / 60;
-var step: u64 = 0;
 const game_rect: c.SDL_Rect = .{
     .x = 0,
     .y = 0,
@@ -266,6 +316,12 @@ export fn SDL_AppInit(game: **Game, argc: c_int, argv: [*][*:0]u8) Result {
         return .failure;
     };
 
+    player_bullet_texture = c.IMG_LoadTexture(renderer, "assets/kappa-cutter.png") orelse {
+        c.SDL_Log("Failed to load texture: %s", c.SDL_GetError());
+        return .failure;
+    };
+    _ = c.SDL_SetTextureAlphaModFloat(player_bullet_texture, 0.5);
+
     player_texture = c.IMG_LoadTexture(renderer, "assets/nitori.png") orelse {
         c.SDL_Log("Failed to load texture: %s", c.SDL_GetError());
         return .failure;
@@ -276,11 +332,17 @@ export fn SDL_AppInit(game: **Game, argc: c_int, argv: [*][*:0]u8) Result {
         return .failure;
     };
 
+    option_texture = c.IMG_LoadTexture(renderer, "assets/option.png") orelse {
+        c.SDL_Log("Failed to load texture: %s", c.SDL_GetError());
+        return .failure;
+    };
+
     game.* = gpa.create(Game) catch {
         log.err("out of memory", .{});
         return .failure;
     };
     game.*.* = .{
+        .step = 0,
         .renderer = renderer.?,
         .window = window.?,
         .rand = .init(0),
@@ -321,7 +383,7 @@ export fn SDL_AppIterate(game: *Game) Result {
 
     _ = c.SDL_SetRenderViewport(game.renderer, &playfield_rect);
 
-    _ = c.SDL_SetRenderDrawColorFloat(game.renderer, 0.8, 0.8, 0.8, c.SDL_ALPHA_OPAQUE_FLOAT);
+    _ = c.SDL_SetRenderDrawColorFloat(game.renderer, 0.9, 0.9, 0.9, c.SDL_ALPHA_OPAQUE_FLOAT);
     _ = c.SDL_RenderFillRect(game.renderer, &.{
         .x = 0,
         .y = 0,
