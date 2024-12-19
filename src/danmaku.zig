@@ -13,6 +13,7 @@ var player_bullet_texture: *c.SDL_Texture = undefined;
 var player_texture: *c.SDL_Texture = undefined;
 var hitbox_texture: *c.SDL_Texture = undefined;
 var option_texture: *c.SDL_Texture = undefined;
+var fairy_texture: *c.SDL_Texture = undefined;
 
 const Game = struct {
     step: u64,
@@ -20,6 +21,7 @@ const Game = struct {
     window: *c.SDL_Window,
     rand: std.Random.DefaultPrng,
     player: Player,
+    enemies: std.ArrayListUnmanaged(Enemy),
     bullets: std.ArrayListUnmanaged(Bullet),
 
     fn random(g: *Game) std.Random {
@@ -29,31 +31,24 @@ const Game = struct {
     fn update(g: *Game) !void {
         g.step += 1;
 
-        try g.player.update();
-
         for (g.bullets.items) |*bullet| {
-            bullet.update();
+            try bullet.update();
+        }
+        try g.player.update();
+        for (g.enemies.items) |*enemy| {
+            try enemy.update();
         }
 
-        if (g.step % 29 == 0) {
-            for (0..16) |_| {
-                const angle: f32 = g.random().float(f32) * 360;
-                try g.bullets.append(std.heap.c_allocator, .{
-                    .game = g,
-                    .texture = bullet_texture,
-                    .sprite = @intCast(g.step % 6),
-                    .x = 370,
-                    .y = 100,
-                    .w = 10,
-                    .h = 16,
-                    .hit = 8,
-                    .vx = @sin(std.math.degreesToRadians(angle)),
-                    .vy = -@cos(std.math.degreesToRadians(angle)),
-                    .player = false,
-                    .dead = false,
-                    .updateFn = &Bullet.updateHoming,
-                });
-            }
+        if (g.step % 60 == 0) {
+            try g.enemies.append(gpa, .{
+                .game = g,
+                .texture = fairy_texture,
+                .x = -32,
+                .y = g.random().float(f32) * 200 + 100,
+                .w = 32,
+                .h = 32,
+                .dead = false,
+            });
         }
 
         var i = g.bullets.items.len;
@@ -68,6 +63,14 @@ const Game = struct {
             }
             if (bullet.dead) {
                 _ = g.bullets.swapRemove(i);
+            }
+        }
+        i = g.enemies.items.len;
+        while (i > 0) {
+            i -= 1;
+            const enemy = &g.enemies.items[i];
+            if (enemy.dead) {
+                _ = g.enemies.swapRemove(i);
             }
         }
     }
@@ -86,14 +89,14 @@ const Bullet = struct {
     vy: f32,
     player: bool,
     dead: bool,
-    updateFn: *const fn (b: *Bullet) void,
+    updateFn: *const fn (b: *Bullet) anyerror!void,
 
-    fn updateConstant(b: *Bullet) void {
+    fn updateConstant(b: *Bullet) anyerror!void {
         b.x += b.vx;
         b.y += b.vy;
     }
 
-    fn updateHoming(b: *Bullet) void {
+    fn updateHoming(b: *Bullet) anyerror!void {
         b.vx -= 0.0001 * (b.x - b.game.player.x);
         b.vy -= 0.0001 * (b.y - b.game.player.y);
         b.x += b.vx;
@@ -102,8 +105,8 @@ const Bullet = struct {
 
     const death_boundary = 50;
 
-    fn update(b: *Bullet) void {
-        b.updateFn(b);
+    fn update(b: *Bullet) !void {
+        try b.updateFn(b);
         b.dead = b.x + b.w <= -death_boundary or
             b.x >= playfield_rect.w + death_boundary or
             b.y + b.h <= -death_boundary or
@@ -136,7 +139,6 @@ const Player = struct {
     game: *Game,
     texture: *c.SDL_Texture,
     hitbox_texture: *c.SDL_Texture,
-    sprite: u32,
     x: f32,
     y: f32,
     w: f32,
@@ -198,9 +200,8 @@ const Player = struct {
     }
 
     fn draw(p: Player) void {
-        const sprite: f32 = @floatFromInt(p.sprite);
         const src: c.SDL_FRect = .{
-            .x = sprite * p.w,
+            .x = 0,
             .y = 0,
             .w = p.w,
             .h = p.h,
@@ -266,6 +267,62 @@ const Player = struct {
         if (dir_x == 0 and dir_y == 0) return .{ 0, 0 };
         const div = std.math.hypot(dir_x, dir_y);
         return .{ magnitude * dir_x / div, magnitude * dir_y / div };
+    }
+};
+
+const Enemy = struct {
+    game: *Game,
+    texture: *c.SDL_Texture,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    dead: bool,
+
+    const death_boundary = 32;
+
+    fn update(e: *Enemy) !void {
+        e.x += 1;
+        if (e.game.step % 61 == 0) {
+            for (0..8) |_| {
+                const angle: f32 = e.game.random().float(f32) * 360;
+                try e.game.bullets.append(std.heap.c_allocator, .{
+                    .game = e.game,
+                    .texture = bullet_texture,
+                    .sprite = @intCast(e.game.step % 6),
+                    .x = e.x,
+                    .y = e.y,
+                    .w = 10,
+                    .h = 16,
+                    .hit = 8,
+                    .vx = @sin(std.math.degreesToRadians(angle)),
+                    .vy = -@cos(std.math.degreesToRadians(angle)),
+                    .player = false,
+                    .dead = false,
+                    .updateFn = &Bullet.updateHoming,
+                });
+            }
+        }
+        e.dead = e.x + e.w <= -death_boundary or
+            e.x >= playfield_rect.w + death_boundary or
+            e.y + e.h <= -death_boundary or
+            e.y >= playfield_rect.h + death_boundary;
+    }
+
+    fn draw(e: Enemy) void {
+        const src: c.SDL_FRect = .{
+            .x = 0,
+            .y = 0,
+            .w = e.w,
+            .h = e.h,
+        };
+        const dest: c.SDL_FRect = .{
+            .x = e.x - e.w / 2,
+            .y = e.y - e.h / 2,
+            .w = e.w,
+            .h = e.h,
+        };
+        _ = c.SDL_RenderTexture(e.game.renderer, e.texture, &src, &dest);
     }
 };
 
@@ -337,6 +394,11 @@ export fn SDL_AppInit(game: **Game, argc: c_int, argv: [*][*:0]u8) Result {
         return .failure;
     };
 
+    fairy_texture = c.IMG_LoadTexture(renderer, "assets/fairy-small.png") orelse {
+        c.SDL_Log("Failed to load texture: %s", c.SDL_GetError());
+        return .failure;
+    };
+
     game.* = gpa.create(Game) catch {
         log.err("out of memory", .{});
         return .failure;
@@ -350,7 +412,6 @@ export fn SDL_AppInit(game: **Game, argc: c_int, argv: [*][*:0]u8) Result {
             .game = game.*,
             .texture = player_texture,
             .hitbox_texture = hitbox_texture,
-            .sprite = 0,
             .x = 370,
             .y = 700,
             .w = 40,
@@ -364,6 +425,7 @@ export fn SDL_AppInit(game: **Game, argc: c_int, argv: [*][*:0]u8) Result {
             .up = false,
         },
         .bullets = .empty,
+        .enemies = .empty,
     };
 
     last_step = c.SDL_GetTicks();
@@ -398,6 +460,9 @@ export fn SDL_AppIterate(game: *Game) Result {
     }
 
     game.player.draw();
+    for (game.enemies.items) |enemy| {
+        enemy.draw();
+    }
     for (game.bullets.items) |bullet| {
         bullet.draw();
     }
